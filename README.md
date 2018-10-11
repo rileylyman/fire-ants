@@ -1,2 +1,2 @@
-# fire-ants
+# FireAnts
 Distributed data processing library
