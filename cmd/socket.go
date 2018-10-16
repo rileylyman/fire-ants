@@ -124,17 +124,17 @@ func (client *Client) send() {
 
 func startClientMode() {
 	fmt.Println("Starting client...")
-	connection, err := net.Dial("tcp", "localhost:12345")
+	connection, err := net.Dial("tcp", "10.142.144.63:12345")
 	if err != nil {
 		fmt.Println(err)
 	}
 	client := &Client{socket: connection}
 	go client.receive()
-	go client.send()
+	client.send()
 
 }
 
-func _main() {
+func main() {
 	flagMode := flag.String("mode", "server", "start in client or server mode")
 	flag.Parse()
 

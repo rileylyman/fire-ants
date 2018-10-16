@@ -74,7 +74,7 @@ func TimeIt(mul func(*SquareMatrix, *SquareMatrix) *SquareMatrix, A, B *SquareMa
 	close(c)
 }
 
-func main() {
+func _main() {
 	size, err := strconv.ParseUint(os.Args[1], 10, 64)
 	if err != nil {
 		fmt.Println("Invalid size for matrix")
