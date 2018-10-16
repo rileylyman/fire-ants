@@ -17,49 +17,67 @@ type Entity struct {
 
 type WorkerManager struct {
 	elements      []Entity
+	indices       chan int
 	readyWorkers  map[*Worker]bool
 	register      chan *Worker
 	unregister    chan *Worker
-	mutex	      sync.Mutex
+	workerMutex   sync.Mutex
+	elementsMutex sync.Mutex
 }
 
-func (manager *WorkerManager) getWorker(worker *Worker) (worker *Worker, ok bool) {
-	manager.mutex.Lock()
-	worker, ok = manager.readyWorkers[worker]
-	manager.mutex.Unlock()
+func (manager *WorkerManager) getElement(index int) (entity Entity) {
+	manager.elementsMutex.Lock()
+	entity = manager.elements[index]
+	manager.elementsMutex.Unlock()
+	return
+}
+
+func (manager *WorkerManager) getWorker(worker *Worker) (workerStatus bool, ok bool) {
+	manager.workerMutex.Lock()
+	workerStatus, ok = manager.readyWorkers[worker]
+	manager.workerMutex.Unlock()
 	return
 }
 
 func (manager *WorkerManager) setWorker(worker *Worker, ready bool) {
-	manager.mutex.Lock()
-	if _, ok := manager.readyWorkers[worker]; ok {
-		manager.readyWorkers[worker] = ready
-	}
-	manager.mutex.Unlock()
+	manager.workerMutex.Lock()
+	manager.readyWorkers[worker] = ready
+	manager.workerMutex.Unlock()
 }
 
-func (manager *WorkerManager) receive() {
-	for {
-		for worker := range manager.readyWorkers {
-			data := make([]byte, 4096)
-			length, err := worker.socket.Read(data)
-			if err != nil {
-				fmt.Println(err)
-			}
-			if length > 0 {
-				data = data[:length]
-				e := unmarshal(data)
-				fmt.Println(e.Data)
-				manager.elements[e.Index] = *e
-			}
-			manager.setWorker(worker, true)
+func (manager *WorkerManager) deleteWorker(worker *Worker) {
+	manager.workerMutex.Lock()
+	delete(manager.readyWorkers, worker)
+	manager.workerMutex.Unlock()
+}
+
+func (manager *WorkerManager) has(worker *Worker) (ok bool) {
+	manager.workerMutex.Lock()
+	_, ok = manager.readyWorkers[worker]
+	manager.workerMutex.Unlock()
+	return
+}
+
+func (manager *WorkerManager) receive(worker *Worker) {
+	for manager.has(worker) {
+		data := make([]byte, 4096)
+		length, err := worker.socket.Read(data)
+		if err != nil {
+			fmt.Println(err)
 		}
+		if length > 0 {
+			data = data[:length]
+			e := unmarshal(data)
+			fmt.Println(e.Data)
+			manager.elements[e.Index] = *e
+		}
+		manager.setWorker(worker, true)
 
 	}
 }
 
 func (manager *WorkerManager) sendElement(currentIndex int, worker *Worker) {
-	e := manager.elements[currentIndex]
+	e := manager.getElement(currentIndex)
 	bytes, err := json.Marshal(e)
 	if err != nil {
 		fmt.Println(err)
@@ -69,33 +87,32 @@ func (manager *WorkerManager) sendElement(currentIndex int, worker *Worker) {
 	worker.socket.Write(bytes)
 }
 
-func (manager *WorkerManager) sendData() {
-	currentIndex := 0
-	for currentIndex < len(manager.elements) {
-		for worker := range manager.readyWorkers {
-			if manager.readyWorkers[worker] {
-				manager.sendElement(currentIndex, worker)
-				currentIndex += 1
-				fmt.Println("Sending: " + strconv.Itoa(currentIndex))
+func (manager *WorkerManager) sendData(worker *Worker) {
+	for manager.has(worker) {
+		if ready, ok := manager.getWorker(worker); ready && ok {
+			select{
+			case index := <-manager.indices:
+				manager.sendElement(index, worker)
+				fmt.Println("Sending: " + strconv.Itoa(index))
 				manager.setWorker(worker, false)
+			default:
+				break
 			}
 		}
 	}
-	for worker := range manager.readyWorkers {
-		manager.unregister <- worker
-	}
+	manager.unregister <- worker
 }
 
 func (manager *WorkerManager) manage() {
-	go manager.sendData()
-	go manager.receive()
 	for {
 		select {
 		case worker := <-manager.register:
-			manager.readyWorkers[worker] = true
+			manager.setWorker(worker, true)
+			go manager.receive(worker)
+			go manager.sendData(worker)
 		case worker := <-manager.unregister:
 			if _, ok := manager.readyWorkers[worker]; ok {
-				delete(manager.readyWorkers, worker)
+				manager.deleteWorker(worker)
 			}
 		}
 	}
@@ -111,8 +128,14 @@ func (manager *WorkerManager) processConnections(connection net.Listener) {
 }
 
 func startWorkerManager(els []Entity) {
+	idxs := make(chan int, len(els))
+	for index := range els {
+		idxs <- index
+	}
+
 	manager := &WorkerManager{
 		elements:     els,
+		indices :     idxs,
 		readyWorkers: make(map[*Worker]bool),
 		register:     make(chan *Worker),
 		unregister:   make(chan *Worker),
