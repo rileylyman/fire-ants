@@ -1,108 +1,207 @@
 package main
 
 import (
+	"encoding/json"
+	"flag"
 	"fmt"
-	"time"
-	"sync"
-	"os"
+	"net"
 	"strconv"
+	"strings"
 )
 
-func ParallelMultiply(A, B *SquareMatrix) *SquareMatrix {
-	var wg sync.WaitGroup
+type Entity struct {
+	Data  int
+	Index int
+}
 
-	C := &SquareMatrix{size : A.size}
-	C.data = make([]int, A.size * A.size)
+type WorkerManager struct {
+	elements     []Entity
+	readyWorkers map[*Worker]bool
+	register     chan *Worker
+	unregister   chan *Worker
+}
 
-	for row := uint(0); row < A.size; row++ {
-		for col := uint(0); col < A.size; col++ {
-			go mulRowCol(row, col, A, B, C, wg)
+func (manager *WorkerManager) receive() {
+	for {
+		for worker := range manager.readyWorkers {
+			data := make([]byte, 4096)
+			length, err := worker.socket.Read(data)
+			if err != nil {
+				fmt.Println(err)
+			}
+			if length > 0 {
+				data = data[:length]
+				e := unmarshal(data)
+				fmt.Println(e.Data)
+				manager.elements[e.Index] = *e
+			}
+			manager.readyWorkers[worker] = true
 		}
+
 	}
-	wg.Wait()
-
-	return C
 }
 
-func mulRowCol(row, col uint, A, B, C *SquareMatrix, wg sync.WaitGroup) {
-	defer wg.Done()
-	wg.Add(1)
-
-	value := 0
-
-	for k := uint(0); k < A.size; k++ {
-		//go mul(row, col, k, A, B, C, &value, other_wg, mux)
-		value += A.Get(row, k) * B.Get(k, col)
+func (manager *WorkerManager) sendElement(currentIndex int, worker *Worker) {
+	e := manager.elements[currentIndex]
+	bytes, err := json.Marshal(e)
+	if err != nil {
+		fmt.Println(err)
+	} else {
+		fmt.Println(string(bytes))
 	}
-	C.Set(row, col, value)
+	worker.socket.Write(bytes)
 }
 
-func mul(row, col, k uint, A, B, C *SquareMatrix, value *int, wg sync.WaitGroup, mux sync.Mutex) {
-	wg.Add(1)
-	defer wg.Done()
-
-	x := A.Get(row, k) * B.Get(k, col)
-
-	//mux.Lock()
-	(*value) += x
-	//mux.Unlock()
-}
-
-func SerialMultiply(A, B *SquareMatrix) *SquareMatrix {
-	var C *SquareMatrix = &SquareMatrix{size: A.size}
-	C.data = make([]int, A.size * A.size)
-
-	for row := uint(0); row < A.size; row++ {
-		for col := uint(0); col < A.size; col++ {
-			C.Set(row, col, 0)
-			for k := uint(0); k < A.size; k++ {
-				value := A.Get(row, k) * B.Get(k, col)
-				C.Set(row, col, C.Get(row, col) + value)
+func (manager *WorkerManager) sendData() {
+	currentIndex := 0
+	for currentIndex < len(manager.elements) {
+		for worker := range manager.readyWorkers {
+			if manager.readyWorkers[worker] {
+				manager.sendElement(currentIndex, worker)
+				currentIndex += 1
+				fmt.Println("Sending: " + strconv.Itoa(currentIndex))
+				manager.readyWorkers[worker] = false
 			}
 		}
 	}
-
-	return C
-}
-
-func TimeIt(mul func(*SquareMatrix, *SquareMatrix) *SquareMatrix, A, B *SquareMatrix, c chan time.Duration) {
-	start := time.Now()
-	mul(A,B)
-	end := time.Now()
-
-	c <- end.Sub(start)
-	close(c)
-}
-
-func _main() {
-	size, err := strconv.ParseUint(os.Args[1], 10, 64)
-	if err != nil {
-		fmt.Println("Invalid size for matrix")
+	for worker := range manager.readyWorkers {
+		manager.unregister <- worker
 	}
+}
 
-	A := UnitMatrix(uint(size))
-	B := UnitMatrix(uint(size))
-
-	p_channel := make(chan time.Duration, 1)
-	s_channel := make(chan time.Duration, 1)
-
-	go TimeIt(ParallelMultiply, A, B, p_channel)
-	go TimeIt(SerialMultiply, A, B, s_channel)
-
-	gotP, gotS := false, false
+func (manager *WorkerManager) manage() {
+	go manager.sendData()
+	go manager.receive()
 	for {
 		select {
-		case elapsed, ok := <-p_channel:
-			if ok {
-				gotP = true
-				fmt.Println("Time in parallel:", elapsed)
-			}
-		case elapsed, ok := <-s_channel:
-			if ok {
-				gotS = true
-				fmt.Println("Time in serial:", elapsed)
+		case worker := <-manager.register:
+			manager.readyWorkers[worker] = true
+		case worker := <-manager.unregister:
+			if _, ok := manager.readyWorkers[worker]; ok {
+				delete(manager.readyWorkers, worker)
 			}
 		}
-		if gotP && gotS { break }
 	}
+
+}
+
+func (manager *WorkerManager) processConnections(connection net.Listener) {
+	for {
+		conn, _ := connection.Accept()
+		worker := &Worker{socket: conn, data: make(chan []byte)}
+		manager.register <- worker
+	}
+}
+
+func startWorkerManager(els []Entity) {
+	manager := &WorkerManager{
+		elements:     els,
+		readyWorkers: make(map[*Worker]bool),
+		register:     make(chan *Worker),
+		unregister:   make(chan *Worker),
+	}
+	connection, err := net.Listen("tcp", ":12345")
+	if err != nil {
+		fmt.Println(err)
+	}
+	go manager.processConnections(connection)
+	manager.manage()
+}
+
+// GREAT MASTER AND WORKER DVIDE
+
+type Worker struct {
+	socket net.Conn
+	data   chan []byte
+}
+
+func unmarshal(rawData []byte) *Entity {
+	var entityFields map[string]interface{}
+	if marshalError := json.Unmarshal(rawData, &entityFields); marshalError != nil {
+		fmt.Println(marshalError)
+	}
+	entity := &Entity{}
+	entity.Data = int(entityFields["Data"].(float64))
+	entity.Index = int(entityFields["Index"].(float64))
+	return entity
+}
+
+func (worker *Worker) process(rawData []byte) {
+	entity := unmarshal(rawData)
+	entityMap(entity)
+	data, anotherMarshalError := json.Marshal(entity)
+	if anotherMarshalError != nil {
+		fmt.Println(anotherMarshalError)
+	}
+	worker.data <- data
+	fmt.Println("Adding data: " + strconv.Itoa(entity.Data))
+}
+
+func (worker *Worker) stop() {
+	worker.socket.Close()
+	close(worker.data)
+}
+
+func (worker *Worker) send() {
+	for {
+		select {
+		case data := <-worker.data:
+			_, err := worker.socket.Write(data)
+			if err != nil {
+				fmt.Println(err)
+				worker.stop()
+			}
+		}
+	}
+}
+
+func startWorker() {
+
+	fmt.Println("Starting Worker")
+
+	connection, err := net.Dial("tcp", "localhost:12345")
+	if err != nil {
+		fmt.Println(err)
+	}
+	worker := &Worker{socket: connection, data: make(chan []byte)}
+
+	go worker.send()
+
+	for {
+		rawData := make([]byte, 4096)
+		length, err := connection.Read(rawData)
+		fmt.Println("Length Recv: " + strconv.Itoa(length))
+		fmt.Println("Received:" + string(rawData))
+		rawData = rawData[:length]
+		if err != nil {
+			fmt.Println(err)
+			break
+		}
+		if length > 0 {
+			fmt.Println("Processing data ")
+			go worker.process(rawData)
+		} else {
+			fmt.Println("zero length")
+		}
+	}
+}
+
+func entityMap(e *Entity) {
+	e.Data += 1
+}
+
+func main() {
+	flagMode := flag.String("mode", "server", "start in client or server mode")
+	flag.Parse()
+
+	if strings.ToLower(*flagMode) == "server" {
+		array := make([]Entity, 100)
+		for index := range array {
+			array[index] = Entity{Data: 1, Index: index}
+		}
+		startWorkerManager(array)
+	} else {
+		startWorker()
+	}
+
 }
