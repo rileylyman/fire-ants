@@ -134,7 +134,7 @@ func startClientMode() {
 
 }
 
-func main() {
+func _main() {
 	flagMode := flag.String("mode", "server", "start in client or server mode")
 	flag.Parse()
 
