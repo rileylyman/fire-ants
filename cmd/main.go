@@ -7,6 +7,7 @@ import (
 	"net"
 	"strconv"
 	"strings"
+	"sync"
 )
 
 type Entity struct {
@@ -15,10 +16,19 @@ type Entity struct {
 }
 
 type WorkerManager struct {
-	elements     []Entity
-	readyWorkers map[*Worker]bool
-	register     chan *Worker
-	unregister   chan *Worker
+	elements      []Entity
+	readyWorkers  map[*Worker]bool
+	register      chan *Worker
+	unregister    chan *Worker
+	mutex	      sync.Mutex
+}
+
+func (manager *WorkerManager) setWorker(worker *Worker, ready bool) {
+	manager.mutex.Lock()
+	if _, ok := manager.readyWorkers[worker]; ok {
+		manager.readyWorkers[worker] = ready
+	}
+	manager.mutex.Unlock()
 }
 
 func (manager *WorkerManager) receive() {
@@ -35,7 +45,7 @@ func (manager *WorkerManager) receive() {
 				fmt.Println(e.Data)
 				manager.elements[e.Index] = *e
 			}
-			manager.readyWorkers[worker] = true
+			manager.setWorker(worker, true)
 		}
 
 	}
@@ -60,7 +70,7 @@ func (manager *WorkerManager) sendData() {
 				manager.sendElement(currentIndex, worker)
 				currentIndex += 1
 				fmt.Println("Sending: " + strconv.Itoa(currentIndex))
-				manager.readyWorkers[worker] = false
+				manager.setWorker(worker, false)
 			}
 		}
 	}
