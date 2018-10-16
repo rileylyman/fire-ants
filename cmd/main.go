@@ -4,10 +4,10 @@ import (
 	"encoding/json"
 	"flag"
 	"fmt"
-	"net"
-	"strconv"
+	"net"//"strconv"
 	"strings"
 	"sync"
+	"time"
 )
 
 type Entity struct {
@@ -23,6 +23,7 @@ type WorkerManager struct {
 	unregister    chan *Worker
 	workerMutex   sync.Mutex
 	elementsMutex sync.Mutex
+	channelMutex  sync.Mutex
 }
 
 func (manager *WorkerManager) getElement(index int) (entity Entity) {
@@ -58,17 +59,37 @@ func (manager *WorkerManager) has(worker *Worker) (ok bool) {
 	return
 }
 
+func (manager *WorkerManager) queueUnregister(worker *Worker) {
+	manager.channelMutex.Lock()
+	manager.unregister <- worker
+	manager.channelMutex.Unlock()
+}
+
+func (manager *WorkerManager) queueRegister(worker *Worker) {
+	manager.channelMutex.Lock()
+	manager.register <- worker
+	manager.channelMutex.Unlock()
+}
+
+func (manager *WorkerManager) isRunning() (running bool) {
+	manager.channelMutex.Lock()
+	running = len(manager.indices) > 0
+	manager.channelMutex.Unlock()
+	return
+}
+
 func (manager *WorkerManager) receive(worker *Worker) {
 	for manager.has(worker) {
 		data := make([]byte, 4096)
 		length, err := worker.socket.Read(data)
 		if err != nil {
+			manager.queueUnregister(worker)
+			break
 			fmt.Println(err)
 		}
 		if length > 0 {
 			data = data[:length]
 			e := unmarshal(data)
-			fmt.Println(e.Data)
 			manager.elements[e.Index] = *e
 		}
 		manager.setWorker(worker, true)
@@ -81,8 +102,7 @@ func (manager *WorkerManager) sendElement(currentIndex int, worker *Worker) {
 	bytes, err := json.Marshal(e)
 	if err != nil {
 		fmt.Println(err)
-	} else {
-		fmt.Println(string(bytes))
+		manager.queueUnregister(worker)
 	}
 	worker.socket.Write(bytes)
 }
@@ -93,18 +113,16 @@ func (manager *WorkerManager) sendData(worker *Worker) {
 			select{
 			case index := <-manager.indices:
 				manager.sendElement(index, worker)
-				fmt.Println("Sending: " + strconv.Itoa(index))
 				manager.setWorker(worker, false)
 			default:
 				break
 			}
 		}
 	}
-	manager.unregister <- worker
 }
 
 func (manager *WorkerManager) manage() {
-	for {
+	for manager.isRunning() {
 		select {
 		case worker := <-manager.register:
 			manager.setWorker(worker, true)
@@ -120,10 +138,10 @@ func (manager *WorkerManager) manage() {
 }
 
 func (manager *WorkerManager) processConnections(connection net.Listener) {
-	for {
+	for manager.isRunning() {
 		conn, _ := connection.Accept()
 		worker := &Worker{socket: conn, data: make(chan []byte)}
-		manager.register <- worker
+		manager.queueRegister(worker)
 	}
 }
 
@@ -144,8 +162,18 @@ func startWorkerManager(els []Entity) {
 	if err != nil {
 		fmt.Println(err)
 	}
+	start := time.Now()
+	go manager.manage()
 	go manager.processConnections(connection)
-	manager.manage()
+
+	for manager.isRunning() {}
+	duration := time.Now().Sub(start)
+	for _, ent := range manager.elements {
+		fmt.Print(ent.Data)
+		fmt.Print(" - ")
+	}
+	fmt.Print("\nTime elapsed over network: ")
+	fmt.Println(duration)
 }
 
 // GREAT MASTER AND WORKER DVIDE
@@ -174,7 +202,7 @@ func (worker *Worker) process(rawData []byte) {
 		fmt.Println(anotherMarshalError)
 	}
 	worker.data <- data
-	fmt.Println("Adding data: " + strconv.Itoa(entity.Data))
+	//fmt.Println("Adding data: " + strconv.Itoa(entity.Data))
 }
 
 func (worker *Worker) stop() {
@@ -197,7 +225,6 @@ func (worker *Worker) send() {
 
 func startWorker() {
 
-	fmt.Println("Starting Worker")
 
 	connection, err := net.Dial("tcp", "localhost:12345")
 	if err != nil {
@@ -210,18 +237,14 @@ func startWorker() {
 	for {
 		rawData := make([]byte, 4096)
 		length, err := connection.Read(rawData)
-		fmt.Println("Length Recv: " + strconv.Itoa(length))
-		fmt.Println("Received:" + string(rawData))
+		//fmt.Println("Received:" + string(rawData))
 		rawData = rawData[:length]
 		if err != nil {
 			fmt.Println(err)
 			break
 		}
 		if length > 0 {
-			fmt.Println("Processing data ")
 			go worker.process(rawData)
-		} else {
-			fmt.Println("zero length")
 		}
 	}
 }
@@ -232,10 +255,11 @@ func entityMap(e *Entity) {
 
 func main() {
 	flagMode := flag.String("mode", "server", "start in client or server mode")
+	flagSize := flag.Int("size", 100, "the size of the sample array")
 	flag.Parse()
 
 	if strings.ToLower(*flagMode) == "server" {
-		array := make([]Entity, 100)
+		array := make([]Entity, *flagSize)
 		for index := range array {
 			array[index] = Entity{Data: 1, Index: index}
 		}
@@ -243,5 +267,14 @@ func main() {
 	} else {
 		startWorker()
 	}
+
+	start := time.Now()
+	els := make([]int, *flagSize)
+	for index := range els {
+		els[index] += 1
+	}
+	duration := time.Now().Sub(start)
+	fmt.Print("Time elapsed in serial: ")
+	fmt.Println(duration)
 
 }
