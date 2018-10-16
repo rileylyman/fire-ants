@@ -23,6 +23,13 @@ type WorkerManager struct {
 	mutex	      sync.Mutex
 }
 
+func (manager *WorkerManager) getWorker(worker *Worker) (worker *Worker, ok bool) {
+	manager.mutex.Lock()
+	worker, ok = manager.readyWorkers[worker]
+	manager.mutex.Unlock()
+	return
+}
+
 func (manager *WorkerManager) setWorker(worker *Worker, ready bool) {
 	manager.mutex.Lock()
 	if _, ok := manager.readyWorkers[worker]; ok {
